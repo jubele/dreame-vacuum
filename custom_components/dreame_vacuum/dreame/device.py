@@ -1964,7 +1964,7 @@ class DreameVacuumDevice:
                         pass
 
                     if self._ready:
-                        for k, v in copy.deepcopy(self.status._history_map_data).items():
+                        for k in list(self.status._history_map_data.keys()):
                             found = False
                             if self.status._cleaning_history:
                                 for item in self.status._cleaning_history:

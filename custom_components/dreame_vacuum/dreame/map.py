@@ -602,6 +602,10 @@ class DreameMapVacuumMapManager:
                 else self._protocol.cloud.get_file_url(object_name)
             )
             if response:
+                # Drop expired urls, object names change on every map upload and would accumulate forever
+                for name, item in list(self._file_urls.items()):
+                    if item[MAP_PARAMETER_EXPIRES_TIME] <= now:
+                        self._file_urls.pop(name, None)
                 self._file_urls[object_name] = {
                     MAP_PARAMETER_URL: response,
                     MAP_PARAMETER_EXPIRES_TIME: now + (30 * 60),
@@ -7921,13 +7925,35 @@ class DreameVacuumMapRenderer:
         return source
 
     @staticmethod
+    def _trim_layer(image):
+        """Crop a full canvas sized layer to the area that is actually drawn.
+
+        Segment, obstacle, furniture and cruise point layers are rendered on a canvas as large as the whole map
+        but each one only contains a small icon or label. Keeping the full canvas for every item in the cache
+        uses tens of megabytes per item, so only the visible part and its offset are kept.
+        """
+        if image is None:
+            return None
+        if isinstance(image, tuple):
+            return image
+        bbox = image.getchannel("A").getbbox()
+        if not bbox:
+            return None
+        if bbox == (0, 0, image.size[0], image.size[1]):
+            return image
+        return (image.crop(bbox), (bbox[0], bbox[1]))
+
+    @staticmethod
     def _combine_layers(cached_layers, layer_size, parent, sub):
         cached_layers[parent] = Image.new("RGBA", layer_size, (255, 255, 255, 0))
         if sub in cached_layers:
-            for k, v in sorted(cached_layers[sub].items()):
+            for k, v in sorted(cached_layers[sub].items(), key=lambda item: item[0]):
                 if v is not None:
                     try:
-                        cached_layers[parent] = Image.alpha_composite(cached_layers[parent], v)
+                        if isinstance(v, tuple):
+                            cached_layers[parent].alpha_composite(v[0], dest=v[1])
+                        else:
+                            cached_layers[parent] = Image.alpha_composite(cached_layers[parent], v)
                     except:
                         pass
 
@@ -10022,15 +10048,17 @@ class DreameVacuumMapRenderer:
                         or self._map_data.hidden_segments != map_data.hidden_segments
                     ):
                         changed = True
-                        cached_layers[MapRendererLayer.FURNITURE][k] = self.render_furniture(
-                            v,
-                            map_data.furniture_version,
-                            map_data.hidden_segments,
-                            layer_size,
-                            map_data.dimensions,
-                            int((icon_size * 1.2) * map_data.dimensions.scale),
-                            map_data.rotation,
-                            scale,
+                        cached_layers[MapRendererLayer.FURNITURE][k] = self._trim_layer(
+                            self.render_furniture(
+                                v,
+                                map_data.furniture_version,
+                                map_data.hidden_segments,
+                                layer_size,
+                                map_data.dimensions,
+                                int((icon_size * 1.2) * map_data.dimensions.scale),
+                                map_data.rotation,
+                                scale,
+                            )
                         )
 
                 if changed:
@@ -10167,22 +10195,28 @@ class DreameVacuumMapRenderer:
                         ),
                     ):
                         changed = True
-                        cached_layers[MapRendererLayer.SEGMENT][k] = self.render_segment(
-                            v,
-                            bool((not map_data.saved_map or map_data.recovery_map) and map_data.cleanset),
-                            bool((not map_data.saved_map or map_data.recovery_map) and map_data.sequence),
-                            layer_size,
-                            map_data.dimensions,
-                            int(segment_icon_size * map_data.dimensions.scale),
-                            map_data.rotation,
-                            scale,
-                            (
-                                (not map_data.active_segments or k in map_data.active_segments)
-                                and (not map_data.hidden_segments or k not in map_data.hidden_segments)
-                                and not map_data.cleaning_map
-                            ),
-                            (map_data.cleaning_map and map_data.blocked_segments and k in map_data.blocked_segments),
-                            cleaning_sequence,
+                        cached_layers[MapRendererLayer.SEGMENT][k] = self._trim_layer(
+                            self.render_segment(
+                                v,
+                                bool((not map_data.saved_map or map_data.recovery_map) and map_data.cleanset),
+                                bool((not map_data.saved_map or map_data.recovery_map) and map_data.sequence),
+                                layer_size,
+                                map_data.dimensions,
+                                int(segment_icon_size * map_data.dimensions.scale),
+                                map_data.rotation,
+                                scale,
+                                (
+                                    (not map_data.active_segments or k in map_data.active_segments)
+                                    and (not map_data.hidden_segments or k not in map_data.hidden_segments)
+                                    and not map_data.cleaning_map
+                                ),
+                                (
+                                    map_data.cleaning_map
+                                    and map_data.blocked_segments
+                                    and k in map_data.blocked_segments
+                                ),
+                                cleaning_sequence,
+                            )
                         )
 
                 if changed:
@@ -10534,7 +10568,7 @@ class DreameVacuumMapRenderer:
                         )
                         if obstacle_image:
                             changed = True
-                            cached_layers[MapRendererLayer.OBSTACLE][k] = obstacle_image
+                            cached_layers[MapRendererLayer.OBSTACLE][k] = self._trim_layer(obstacle_image)
                         elif k in cached_layers[MapRendererLayer.OBSTACLE]:
                             del cached_layers[MapRendererLayer.OBSTACLE][k]
 
@@ -10575,14 +10609,16 @@ class DreameVacuumMapRenderer:
                         or self._map_data.rotation != map_data.rotation
                     ):
                         changed = True
-                        cached_layers[MapRendererLayer.CRUISE_POINT][k] = self.render_cruise_point(
-                            k,
-                            v,
-                            layer_size,
-                            map_data.dimensions,
-                            int(round(icon_size * 1.25 * map_data.dimensions.scale)),
-                            map_data.rotation,
-                            scale,
+                        cached_layers[MapRendererLayer.CRUISE_POINT][k] = self._trim_layer(
+                            self.render_cruise_point(
+                                k,
+                                v,
+                                layer_size,
+                                map_data.dimensions,
+                                int(round(icon_size * 1.25 * map_data.dimensions.scale)),
+                                map_data.rotation,
+                                scale,
+                            )
                         )
 
                 if changed:
@@ -10604,9 +10640,20 @@ class DreameVacuumMapRenderer:
                 if cached_layers.get(l):
                     if l in changes:
                         _LOGGER.debug("Render %s", l.name)
-                    cached_layers[MapRendererLayer.OBJECTS] = Image.alpha_composite(
-                        cached_layers[MapRendererLayer.OBJECTS], cached_layers[l]
-                    )
+                    if self._cache and not isinstance(cached_layers[l], tuple):
+                        # Keep only the drawn part of the layer in the cache
+                        cached_layers[l] = self._trim_layer(cached_layers[l]) or (
+                            Image.new("RGBA", (1, 1), (255, 255, 255, 0)),
+                            (0, 0),
+                        )
+                    if isinstance(cached_layers[l], tuple):
+                        cached_layers[MapRendererLayer.OBJECTS].alpha_composite(
+                            cached_layers[l][0], dest=cached_layers[l][1]
+                        )
+                    else:
+                        cached_layers[MapRendererLayer.OBJECTS] = Image.alpha_composite(
+                            cached_layers[MapRendererLayer.OBJECTS], cached_layers[l]
+                        )
 
             if layer_size != map_image.size:
                 cached_layers[MapRendererLayer.OBJECTS].thumbnail(

@@ -12661,6 +12661,7 @@ class DreameVacuumMapRenderer:
 class DreameVacuumMapOptimizer:
     def __init__(self) -> None:
         self._js_optimizer = None
+        self._js_optimizer_unavailable = False
         self._lock = threading.Lock()
 
     def _clean_wall(self, data, width, height):
@@ -14003,13 +14004,23 @@ class DreameVacuumMapOptimizer:
             if map_data.wifi_map:
                 return DreameVacuumMapDecoder.optimize_wifi_map(map_data)
 
+            if js_optimizer and self._js_optimizer is None and not self._js_optimizer_unavailable:
+                try:
+                    js = MiniRacer()
+                    js.eval(base64.b64decode(MAP_OPTIMIZER_JS).decode("utf-8"))
+                    self._js_optimizer = js
+                except Exception as ex:
+                    # V8 can not be loaded on some systems (e.g. musl based Home Assistant images),
+                    # use the built-in optimizer instead of failing on every map update.
+                    self._js_optimizer_unavailable = True
+                    _LOGGER.warning("JS map optimizer is not available, using built-in optimizer: %s", ex)
+            if self._js_optimizer_unavailable:
+                js_optimizer = False
+
             try:
                 now = time.time()
 
                 if js_optimizer:
-                    if self._js_optimizer == None:
-                        self._js_optimizer = MiniRacer()
-                        self._js_optimizer.eval(base64.b64decode(MAP_OPTIMIZER_JS).decode("utf-8"))
 
                     data = map_data.pixel_type.tolist()
                     data_size = [
